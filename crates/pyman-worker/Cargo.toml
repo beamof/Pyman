@@ -1,0 +1,12 @@
+[package]
+name = "pyman-worker"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+pyo3 = { version = "0.23", features = ["auto-initialize"] }
+serde_json.workspace = true
+
+# Treat this binary as a leaf: it must never depend on pyman (the GUI).

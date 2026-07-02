@@ -1,0 +1,32 @@
+[package]
+name = "pyman"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "pyman"
+path = "src/main.rs"
+
+[build-dependencies]
+# (none) — build.rs only emits linker args, no extra crates needed.
+
+[dependencies]
+eframe = "0.29"
+egui = "0.29"
+dirs = "6"
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+# ab_glyph is what egui uses internally to parse fonts; we use it in a test to
+# confirm the system CJK fonts we load are actually parseable and cover CJK.
+ab_glyph = "0.2"
+# Used only in the icon test to write a PNG for manual visual inspection.
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+# The GUI never embeds Python itself. Each script runs in a separate
+# pyman-worker process (see the pyman-worker crate), which embeds CPython via
+# pyo3. That gives true process isolation: a crashing script cannot take down
+# the manager UI.
