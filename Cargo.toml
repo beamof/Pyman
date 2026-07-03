@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/pyman", "crates/pyman-worker"]
+members = ["crates/pyman"]
 
 [workspace.package]
 version = "0.1.0"

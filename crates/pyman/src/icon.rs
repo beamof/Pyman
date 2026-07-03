@@ -48,7 +48,7 @@ fn render() -> Vec<Color32> {
             // falls in the outer band; between teeth the gear edge is body_r.
             let ang = dy.atan2(dx); // -pi..pi
             let tooth_phase = (ang * teeth).sin(); // -1..1, 8 humps over full circle
-            let edge_r = body_r + (outer_r - body_r) * (tooth_phase * 0.5 + 0.5).max(0.0).min(1.0);
+            let edge_r = body_r + (outer_r - body_r) * (tooth_phase * 0.5 + 0.5).clamp(0.0, 1.0);
 
             // Gear ring pixel: within edge_r but outside the inner hole.
             let is_gear = dist <= edge_r && dist >= inner_r;

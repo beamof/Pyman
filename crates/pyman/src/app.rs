@@ -53,8 +53,6 @@ pub struct PymanApp {
     script_input: String,
     /// Form: args text field (space-separated, like a shell).
     args_input: String,
-    /// Form: autostart checkbox.
-    autostart_input: bool,
     /// Which entry's log is currently selected in the viewer.
     selected: Option<u64>,
     /// Most recent user-facing message (e.g. "added", "invalid path").
@@ -105,7 +103,6 @@ impl Default for PymanApp {
             next_id,
             script_input: String::new(),
             args_input: String::new(),
-            autostart_input: false,
             // Select the first entry, if any, so the log viewer isn't empty.
             selected: None,
             flash: None,
@@ -148,7 +145,10 @@ impl PymanApp {
             script: p,
             args: Self::parse_args(&self.args_input),
         };
-        let autostart = self.autostart_input;
+        // The "下次启动自动运行" form option was removed — newly added scripts
+        // default to not autostarting. Users can still toggle autostart per
+        // entry in the list ("自启✓" chip).
+        let autostart = false;
         // No name field in the UI — derive the label from the script's file
         // name so the list reads e.g. "hello.py" instead of a full path.
         let name =
@@ -160,7 +160,7 @@ impl PymanApp {
         // autostart only governs *next launch* behavior.
         match ScriptTask::spawn(id, config.clone()) {
             Ok(task) => {
-                self.flash = Some(format!("已启动 #{}: {}", id, config.script.display()));
+                // Select the entry so its log is shown in the viewer.
                 self.selected = Some(id);
                 self.entries.push(Entry {
                     id,
@@ -178,13 +178,12 @@ impl PymanApp {
     /// Start (or restart) a stopped entry's worker.
     fn run_entry(&mut self, id: u64) {
         // Move the config out temporarily to avoid borrowing self during spawn.
-        let (name, config) = match self.entries.iter().find(|e| e.id == id) {
-            Some(e) => (e.name.clone(), e.config.clone()),
+        let config = match self.entries.iter().find(|e| e.id == id) {
+            Some(e) => e.config.clone(),
             None => return,
         };
         match ScriptTask::spawn(id, config) {
             Ok(task) => {
-                self.flash = Some(format!("已启动: {name}"));
                 // Select the entry so its log is shown in the viewer — without
                 // this the viewer keeps showing whatever was previously
                 // selected, so the just-started script's output is hidden.
@@ -210,7 +209,9 @@ impl PymanApp {
     fn remove_entry(&mut self, id: u64) {
         if let Some(e) = self.entries.iter_mut().find(|e| e.id == id) {
             if e.is_running() {
-                e.task.as_mut().map(|t| t.stop());
+                if let Some(t) = e.task.as_mut() {
+                    t.stop();
+                }
                 self.flash = Some("请先停止后再移除".into());
                 return;
             }
@@ -278,8 +279,9 @@ impl eframe::App for PymanApp {
             for e in &self.entries {
                 ui.horizontal(|ui| {
                     let is_sel = self.selected == Some(e.id);
-                    let badge = entry_state_badge(e);
-                    let label = format!("#{} {} {}", e.id, e.name, badge);
+                    // State is shown as a colored chip below (green=running,
+                    // red=stopped), so the row label just carries id + name.
+                    let label = format!("#{} {}", e.id, e.name);
                     if ui.selectable_label(is_sel, &label).clicked() {
                         self.selected = Some(e.id);
                     }
@@ -308,17 +310,57 @@ impl eframe::App for PymanApp {
                     if clicked {
                         action = Some(TaskAction::ToggleAutostart(e.id));
                     }
-                    if e.is_running() {
-                        if ui.small_button("⏹ 停止").clicked() {
-                            action = Some(TaskAction::Stop(e.id));
-                        }
-                    } else {
-                        if ui.small_button("▶ 运行").clicked() {
-                            action = Some(TaskAction::Run(e.id));
-                        }
-                        if ui.small_button("✕ 移除").clicked() {
-                            action = Some(TaskAction::Remove(e.id));
-                        }
+                    // Status chip: a colored, clickable button whose fill
+                    // signals the task state (green=running, red=not running)
+                    // and whose click toggles it. We keep the short state word
+                    // as the label so the chip conveys more than two states
+                    // (完成/失败/已停止/未运行 all map to red but read
+                    // distinctly). The "⏹"/"▶" glyphs are CJK-covered so they
+                    // render fine; text is forced white for contrast on both
+                    // the green and red fills (see the autostart button above
+                    // for why explicit white matters on light themes).
+                    let (chip_fill, chip_label, hover, chip_action) =
+                        if e.is_running() {
+                            (
+                                egui::Color32::from_rgb(46, 125, 50), // green-800
+                                "⏹ 运行中",
+                                "运行中 — 点击停止",
+                                TaskAction::Stop(e.id),
+                            )
+                        } else {
+                            (
+                                egui::Color32::from_rgb(198, 40, 40), // red-800
+                                match entry_state_badge(e) {
+                                    "完成" => "▶ 已完成",
+                                    "失败" => "▶ 已失败",
+                                    "已停止" => "▶ 已停止",
+                                    _ => "▶ 未运行",
+                                },
+                                "未运行 — 点击运行",
+                                TaskAction::Run(e.id),
+                            )
+                        };
+                    let chip = ui.add(
+                        egui::Button::new(
+                            egui::RichText::new(chip_label)
+                                .color(egui::Color32::WHITE)
+                                .small(),
+                        )
+                        .fill(chip_fill)
+                        .stroke(egui::Stroke::NONE),
+                    );
+                    // `on_hover_text` consumes the Response, so capture the
+                    // click first.
+                    let clicked = chip.clicked();
+                    chip.on_hover_text(hover);
+                    if clicked {
+                        action = Some(chip_action);
+                    }
+                    // `&&` short-circuits, so the button only renders (and is
+                    // hittable) when the task isn't running — matching the old
+                    // nested-if behavior while satisfying clippy::collapsible_if.
+                    if !e.is_running() && ui.small_button("✕ 移除").clicked() {
+                        action = Some(TaskAction::Remove(e.id));
                     }
                 });
             }
@@ -333,6 +375,36 @@ impl eframe::App for PymanApp {
                     ui.label("脚本路径:");
                     ui.text_edit_singleline(&mut self.script_input)
                         .on_hover_text("Python 脚本的完整路径，例如 C:/scripts/foo.py");
+                    // Native OS file-open dialog. Synchronous (rfd::FileDialog
+                    // blocks this thread until the user picks or cancels); that's
+                    // fine for a desktop tool — the brief UI freeze during the
+                    // modal is the expected behavior of a native dialog, and it
+                    // keeps the wiring trivial (no async runtime to thread
+                    // through egui's immediate-mode update loop). On cancel the
+                    // field is left untouched.
+                    if ui.button("浏览…").clicked() {
+                        let mut dlg = rfd::FileDialog::new()
+                            .set_title("选择 Python 脚本")
+                            .add_filter(
+                                "Python 脚本 (*.py)",
+                                &["py", "pyw"],
+                            )
+                            // Always-on fallback so non-.py scripts (or any
+                            // file the user insists on) remain selectable.
+                            .add_filter("所有文件", &["*"]);
+                        // Start in the directory of the current value if it
+                        // points somewhere real, else let the OS pick (recent/
+                        // documents) — nicer than always landing in C:\.
+                        if let Some(parent) = std::path::Path::new(&self.script_input)
+                            .parent()
+                            .filter(|p| !p.as_os_str().is_empty() && p.is_dir())
+                        {
+                            dlg = dlg.set_directory(parent);
+                        }
+                        if let Some(picked) = dlg.pick_file() {
+                            self.script_input = picked.display().to_string();
+                        }
+                    }
                 });
                 ui.horizontal(|ui| {
                     ui.label("参数:");
@@ -344,12 +416,9 @@ impl eframe::App for PymanApp {
                         self.flash = None;
                         self.add_entry();
                     }
-                    ui.checkbox(&mut self.autostart_input, "下次启动自动运行")
-                        .on_hover_text("勾选后，这条记录会在下次启动 PyMan 时自动运行");
                     if ui.button("清空表单").clicked() {
                         self.script_input.clear();
                         self.args_input.clear();
-                        self.autostart_input = false;
                     }
                 });
             });
@@ -416,6 +485,12 @@ impl PymanApp {
 
 /// Render the log panel for a single task. Free-standing so it can borrow a
 /// `&ScriptTask` without aliasing the rest of the app state.
+///
+/// Each row shows three columns: a local wall-clock timestamp (`HH:MM:SS.mmm`,
+/// captured when the line was read), the origin (`out`/`err`), and the line
+/// text in pure black (stdout) / dark-red (stderr) for readability on both
+/// light and dark themes. The text cell is a selectable label, so the user can
+/// drag-select lines and copy them with Ctrl+C.
 fn draw_log(ui: &mut egui::Ui, task: &ScriptTask) {
     let header = format!(
         "#{}  {}  {}",
@@ -432,16 +507,75 @@ fn draw_log(ui: &mut egui::Ui, task: &ScriptTask) {
     if !task.config.args.is_empty() {
         ui.label(format!("参数: {}", task.config.args.join(" ")));
     }
-    ui.separator();
 
-    // Snapshot the log under lock, render outside the lock.
+    // Snapshot the log under lock, render outside the lock. We carry ts_ms too
+    // so each rendered row can show the wall-clock time the line arrived.
     let (lines, total) = {
         let buf = task.log.lock().unwrap();
         let total = buf.lines.len();
-        let snapshot: Vec<(Stream, String)> =
-            buf.lines.iter().map(|l| (l.stream, l.text.clone())).collect();
+        let snapshot: Vec<(u128, Stream, String)> = buf
+            .lines
+            .iter()
+            .map(|l| (l.ts_ms, l.stream, l.text.clone()))
+            .collect();
         (snapshot, total)
     };
+
+    // Toolbar: copy-all button. egui's per-label selection only works within a
+    // single line, which is useless for multi-line logs — so we offer a
+    // one-click "copy everything" that writes the whole buffer (with
+    // timestamps) to the system clipboard via ctx.copy_text. The "已复制 ✓"
+    // feedback is transient UI state keyed per task.
+    let copied_key = egui::Id::new(("log_copied_at", task.id));
+    let cleared_key = egui::Id::new(("log_cleared_at", task.id));
+    ui.horizontal(|ui| {
+        let tooltip = "把当前脚本的全部日志（含时间戳）复制到剪贴板";
+        if ui.button("📋 复制全部").on_hover_text(tooltip).clicked() {
+            let blob = lines
+                .iter()
+                .map(|(ts, _stream, text)| format!("{} {}", format_ts(*ts), text))
+                .collect::<Vec<_>>()
+                .join("\n");
+            ui.ctx().copy_text(blob);
+            ui.data_mut(|d| d.insert_temp(copied_key, std::time::Instant::now()));
+        }
+        // Show the confirmation for ~2s after the click. Instant::now() as the
+        // fallback keeps the closure total (no panic on missing key).
+        let just_copied = ui
+            .data(|d| {
+                d.get_temp::<std::time::Instant>(copied_key)
+                    .map(|t| t.elapsed().as_secs() < 2)
+            })
+            .unwrap_or(false);
+        if just_copied {
+            // Plain text — no checkmark glyph: U+2713 isn't covered by egui's
+            // bundled Latin font nor the CJK fallback, so it renders as tofu.
+            // The green color already signals success.
+            ui.colored_label(egui::Color32::from_rgb(46, 125, 50), "已复制");
+        }
+        // Clear the in-memory log buffer for this task. New output keeps
+        // accumulating (the reader threads are untouched), so this only wipes
+        // the displayed history. Mirror the copy button's transient ✓ feedback.
+        if ui
+            .button("🗑 清空日志")
+            .on_hover_text("清空当前脚本的日志显示（脚本仍会继续输出新内容）")
+            .clicked()
+        {
+            task.clear_log();
+            ui.data_mut(|d| d.insert_temp(cleared_key, std::time::Instant::now()));
+        }
+        let just_cleared = ui
+            .data(|d| {
+                d.get_temp::<std::time::Instant>(cleared_key)
+                    .map(|t| t.elapsed().as_secs() < 2)
+            })
+            .unwrap_or(false);
+        if just_cleared {
+            ui.colored_label(egui::Color32::from_rgb(46, 125, 50), "已清空");
+        }
+        ui.label(format!("{total} 行"));
+    });
+    ui.separator();
 
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
@@ -452,43 +586,75 @@ fn draw_log(ui: &mut egui::Ui, task: &ScriptTask) {
                 ui.label("(还没有输出)");
                 return;
             }
+            // Two columns: 时间 | 输出内容. The output column uses
+            // Label::selectable(true) so the user can drag-select and Ctrl+C
+            // copy log text (egui's default `ui.label` selection is often
+            // visually subtle / theme-dependent; making it explicit also keeps
+            // it working if the global style turns selectable labels off). The
+            // stream origin (stdout/stderr) is conveyed only by color now —
+            // black for stdout, dark-red for stderr.
             egui::Grid::new(format!("log_{}", task.id))
                 .striped(true)
                 .num_columns(2)
                 .show(ui, |ui| {
-                    for (stream, text) in &lines {
-                        let color = match stream {
-                            Stream::Stdout => egui::Color32::from_gray(220),
-                            Stream::Stderr => egui::Color32::from_rgb(255, 170, 170),
-                        };
+                    for (ts_ms, stream, text) in &lines {
+                        // Timestamp: local wall-clock HH:MM:SS.mmm. Compact and
+                        // dim so it stays a secondary annotation.
                         ui.label(
-                            egui::RichText::new(match stream {
-                                Stream::Stdout => "out",
-                                Stream::Stderr => "err",
-                            })
-                            .small()
-                            .color(egui::Color32::DARK_GRAY),
-                        );
-                        ui.label(
-                            egui::RichText::new(text)
-                                .color(color)
+                            egui::RichText::new(format_ts(*ts_ms))
+                                .small()
+                                .color(egui::Color32::DARK_GRAY)
                                 .family(egui::FontFamily::Monospace),
+                        );
+                        // Body text: pure black for readability (the old
+                        // near-white stdout color vanished on light themes).
+                        // stderr keeps a distinct dark-red so the two streams
+                        // are still tellable apart at a glance.
+                        let body_color = match stream {
+                            Stream::Stdout => egui::Color32::BLACK,
+                            Stream::Stderr => egui::Color32::from_rgb(170, 0, 0),
+                        };
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(text)
+                                    .color(body_color)
+                                    .family(egui::FontFamily::Monospace),
+                            )
+                            .selectable(true)
+                            // Let long lines wrap inside the cell instead of
+                            // forcing the grid wider than the panel.
+                            .wrap(),
                         );
                         ui.end_row();
                     }
                 });
         });
-    ui.label(format!("{total} 行"));
 }
 
-/// Badge for an entry's current state, accounting for stopped (no task) entries.
+/// Format a unix-epoch-millis timestamp as local `HH:MM:SS.mmm`.
+///
+/// The log buffer stores UTC milliseconds (see `supervisor::now_ms`); for a
+/// script-manager UI, local time is what a user expects to read, so we convert
+/// via chrono's local zone. Falls back to a plain millis counter if the system
+/// clock / zone is unavailable so rendering never panics.
+fn format_ts(ts_ms: u128) -> String {
+    use chrono::TimeZone;
+    match chrono::Local.timestamp_millis_opt(ts_ms as i64).single() {
+        Some(t) => t.format("%H:%M:%S%.3f").to_string(),
+        None => format!("+{ts_ms}ms"),
+    }
+}
+
+/// Short state word for an entry, accounting for stopped (no task) entries.
+/// Used to label the status chip; the brackets/brackets-style "[运行中]" form
+/// is gone now that the chip itself carries the visual weight.
 fn entry_state_badge(e: &Entry) -> &'static str {
     match e.task.as_ref().map(|t| t.state) {
-        Some(TaskState::Running) => "[运行中]",
-        Some(TaskState::Finished) => "[完成]",
-        Some(TaskState::Failed) => "[失败]",
-        Some(TaskState::Stopped) => "[已停止]",
-        None => "[未运行]",
+        Some(TaskState::Running) => "运行中",
+        Some(TaskState::Finished) => "完成",
+        Some(TaskState::Failed) => "失败",
+        Some(TaskState::Stopped) => "已停止",
+        None => "未运行",
     }
 }
 

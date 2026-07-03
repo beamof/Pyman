@@ -1,19 +1,52 @@
-//! pyman: a small native window for managing Python scripts.
+//! pyman: a single binary that is both the GUI and the per-script worker.
 //!
-//! Each script runs in its own `pyman-worker` process (a separate binary built
-//! from this same workspace), which embeds CPython via pyo3. See the
-//! `supervisor` module for how child processes are spawned and streamed.
+//! PyMan ships as **one** executable. Which role it takes is decided here, at
+//! the very top of `main`, by looking at how it was invoked:
+//!
+//! * **Worker mode** — `pyman --worker <script> [args...]`, or the exe launched
+//!   under the name `pyman-worker[.exe]`. The [`worker`] module embeds CPython
+//!   via pyo3, runs one script, and exits. This is what the supervisor spawns.
+//! * **GUI mode** (default) — everything else: the egui manager window.
+//!
+//! Collapsing the former two-binary workspace (a GUI exe + a `pyman-worker`
+//! exe) into one binary makes release/distribution a single-file affair while
+//! preserving true process isolation: each script still runs in its own
+//! re-executed worker process, so a crashing script can never take down the UI.
 //!
 //! On Windows the GUI is linked against the "windows" subsystem (see
 //! `build.rs`) so launching it does not pop up a console window — while
-//! keeping a normal `main` so `--self-test` output still works.
+//! keeping a normal `main` so `--self-test` and worker output still work when
+//! run from an existing terminal.
 //!
-//! All logic (app UI, history persistence, process supervision) lives in the
-//! library part of this crate (`lib.rs`); this file is the thin entry point.
+//! All logic (app UI, history persistence, process supervision, the worker
+//! runner) lives in the library part of this crate (`lib.rs`); this file is
+//! the thin dispatch + entry point.
 
-use pyman::{app, supervisor};
+use pyman::{app, supervisor, worker};
 
 fn main() -> eframe::Result {
+    // --- Role dispatch -----------------------------------------------------
+    // Worker mode: explicit `--worker` flag, OR the binary renamed to
+    // `pyman-worker` (legacy invocation / convenience alias). The supervisor
+    // always uses the `--worker` flag, but we keep the name-based path so the
+    // old `pyman-worker script.py` form still works for manual debugging.
+    let invoked_as_worker = std::env::args()
+        .next()
+        .as_deref()
+        .map(|arg0| {
+            let stem = std::path::Path::new(arg0)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("");
+            stem.eq_ignore_ascii_case("pyman-worker")
+        })
+        .unwrap_or(false);
+
+    if invoked_as_worker || std::env::args().any(|a| a == "--worker") {
+        std::process::exit(worker::run());
+    }
+
+    // --- GUI mode ----------------------------------------------------------
     // Headless self-test: spawn a worker via the real supervisor, drain its
     // log, and assert the pipeline works. Exits non-zero on failure. Useful in
     // CI / without a display.

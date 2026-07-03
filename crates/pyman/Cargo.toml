@@ -18,6 +18,21 @@ egui = "0.29"
 dirs = "6"
 serde.workspace = true
 serde_json.workspace = true
+# The GUI never initializes Python itself. The single `pyman` binary also
+# serves as the per-script "worker" process (dispatched in `main.rs` via
+# `--worker` / the `pyman-worker` alias); in that role it embeds CPython via
+# pyo3. `auto-initialize` boots the interpreter on first GIL acquisition,
+# which only happens in worker mode — keeping the GUI free of Python.
+pyo3 = { version = "0.23", features = ["auto-initialize"] }
+# Formatting the per-line wall-clock timestamps in the log viewer (local time).
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# Memory-map the CJK system font instead of reading its (often ~40MB) bytes
+# into the heap. Already a transitive dep of eframe, so this adds no new crate.
+memmap2 = "0.9"
+# Native OS file-open dialog for the "浏览..." (browse) button next to the
+# script path field. Uses the platform's own dialog (Windows common dialog,
+# macOS NSOpenPanel, GTK on Linux) — no bundled widget set, no extra glyphs.
+rfd = "0.14"
 
 [dev-dependencies]
 # ab_glyph is what egui uses internally to parse fonts; we use it in a test to
@@ -25,8 +40,3 @@ serde_json.workspace = true
 ab_glyph = "0.2"
 # Used only in the icon test to write a PNG for manual visual inspection.
 image = { version = "0.25", default-features = false, features = ["png"] }
-
-# The GUI never embeds Python itself. Each script runs in a separate
-# pyman-worker process (see the pyman-worker crate), which embeds CPython via
-# pyo3. That gives true process isolation: a crashing script cannot take down
-# the manager UI.

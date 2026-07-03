@@ -1,8 +1,9 @@
-//! Process supervision for pyman-worker child processes.
+//! Process supervision for per-script worker child processes.
 //!
 //! One [`ScriptTask`] exists per running script. Each task owns a child
-//! process and a background thread that reads its merged stdout/stderr
-//! line-by-line into a ring buffer the UI can read.
+//! process — the same `pyman` binary re-executed in worker mode via the
+//! `--worker` flag — and a background thread that reads its merged
+//! stdout/stderr line-by-line into a ring buffer the UI can read.
 
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader};
@@ -76,6 +77,13 @@ impl LogBuffer {
             text,
         });
     }
+
+    /// Drop every buffered line. Used by the UI's "clear log" button — the
+    /// reader threads keep running and will append fresh lines afterwards.
+    fn clear(&mut self) {
+        self.lines.clear();
+        self.seen_up_to = 0;
+    }
 }
 
 fn now_ms() -> u128 {
@@ -100,12 +108,13 @@ pub struct ScriptTask {
 impl ScriptTask {
     /// Spawn a worker for `config`. Returns the task on success.
     ///
-    /// We locate the worker binary next to the running GUI binary so a release
-    /// bundle just needs both exes in the same dir. If not found there we fall
-    /// back to `pyman-worker` on PATH (handy for `cargo run`).
+    /// Each worker is just **this same binary** re-executed with the `--worker`
+    /// flag (see `main.rs`), so a release bundle is a single `pyman[.exe]`:
+    /// no separate worker binary to locate or ship.
     pub fn spawn(id: u64, config: TaskConfig) -> std::io::Result<Self> {
         let worker = locate_worker();
         let mut cmd = Command::new(&worker);
+        cmd.arg("--worker");
         cmd.arg(&config.script);
         cmd.args(&config.args);
         // Merge stderr into stdout via a single piped handle so ordering is
@@ -184,6 +193,14 @@ impl ScriptTask {
         }
     }
 
+    /// Clear the buffered log lines for this task. The log is behind an
+    /// `Arc<Mutex<...>>`, so this only needs `&self` — the UI can call it
+    /// directly without going through a deferred action (which would conflict
+    /// with the immutable borrow held while drawing the list).
+    pub fn clear_log(&self) {
+        self.log.lock().unwrap().clear();
+    }
+
     /// Poll the child process: if it has exited, record exit code + state.
     pub fn poll(&mut self) {
         if self.state != TaskState::Running {
@@ -245,17 +262,18 @@ fn spawn_reader<R: std::io::Read + Send + 'static>(
         .expect("spawn reader thread");
 }
 
-/// Find the worker binary. Prefer a sibling of this exe, else PATH.
+/// Resolve the executable to re-spawn in worker mode.
+///
+/// The worker role lives inside the very same binary (dispatched in `main.rs`
+/// via `--worker`), so we normally just re-exec `current_exe()`. We fall back
+/// to `pyman` (resolved through PATH) if `current_exe()` is unavailable — this
+/// can happen under unusual launchers — so the spawn still has a fighting
+/// chance instead of failing outright.
 fn locate_worker() -> PathBuf {
-    let exe_name = if cfg!(windows) { "pyman-worker.exe" } else { "pyman-worker" };
-
     if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let candidate = dir.join(exe_name);
-            if candidate.exists() {
-                return candidate;
-            }
+        if !exe.as_os_str().is_empty() {
+            return exe;
         }
     }
-    PathBuf::from("pyman-worker")
+    PathBuf::from("pyman")
 }
