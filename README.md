@@ -43,7 +43,9 @@ supervisor 通过 `std::env::current_exe()` 拿到自身路径并带上 `--worke
 ## 依赖要求
 
 - **Rust** 工具链（已用 1.96 测试）。
-- **Python**：pyo3 的 `auto-initialize` 会在运行机器上寻找已安装的 CPython（与构建期一致的 Python 版本系列）。本仓库在 Python 3.12 上验证。Windows 上需要安装好 Python（带共享库 / `python3.dll`；官方安装包默认满足）。
+- **Python**：worker 通过 pyo3 的 `auto-initialize` 在运行机器上加载已安装的 CPython。
+  - **构建期**：采用 `abi3-py38` 稳定 ABI + `generate-import-lib`，pyo3 会自动合成 `python3.dll` 导入库，**构建机无需安装 Python**。
+  - **运行期**：目标机器只需装有 **Python 3.8+** 的任意次版本（官方安装包自带 `python3.dll`），一个 build 即可跑 3.8 / 3.9 / 3.10 / 3.11 / 3.12 / 3.13 / 3.14+，不再绑定具体版本。Python 需在 `PATH` 中，或通过 `PYO3_PYTHON` 环境变量指向 `python.exe`。
 
 ## 构建
 

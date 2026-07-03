@@ -30,21 +30,20 @@ use std::ffi::CString;
 
 /// Locate a usable CPython and make sure pyo3 can load it at runtime.
 ///
-/// pyo3 0.23 with the default (non-abi3) feature resolves `python3.dll` /
-/// `python3XX.dll` at **runtime** via `LoadLibrary` — there's no Python in the
-/// exe's import table. Windows' DLL search walks the usual order (app dir,
-/// system dirs, then `%PATH%`), so a `pyman.exe` copied to a machine without
-/// Python 3.12 fails with "python312.dll not found" the first time the worker
-/// touches Python.
+/// Built with the `abi3-py38` feature, the worker links against CPython's
+/// *stable ABI*: at runtime it loads the version-agnostic `python3.dll`
+/// (Windows) / `libpython3.so` (Linux) and works with any Python >= 3.8 the
+/// user has installed — no specific minor version is hardwired into the exe.
+/// pyo3 resolves that DLL via `LoadLibrary` at first GIL acquisition; Windows'
+/// DLL search walks app dir, system dirs, then `%PATH%`.
 ///
 /// This runs *before* any pyo3 call (see [`run`]) so we can influence that
 /// search. Strategy:
 ///   1. If `PYO3_PYTHON` is set (pyo3's own override), trust it — pyo3 will
 ///      use that interpreter's directory directly. Nothing to prepend.
 ///   2. Otherwise scan `%PATH%` for `python.exe`, take its directory, and
-///      **prepend** it to `PATH`. That puts the matching `python3.dll` /
-///      `python3XX.dll` first in the DLL search. (We don't just read it once:
-///      `set_var` mutates the process env that pyo3's loader inherits.)
+///      **prepend** it to `PATH`. That puts the matching `python3.dll` first
+///      in the DLL search so the loader finds *a* Python rather than none.
 ///   3. If nothing is found, print a friendly Chinese message to stderr — the
 ///      GUI surfaces worker stderr as log lines — and return `false` so the
 ///      caller bails out cleanly instead of letting pyo3 panic on a missing
@@ -52,11 +51,6 @@ use std::ffi::CString;
 ///
 /// Returns `true` if a Python was located (or `PYO3_PYTHON` is set), `false`
 /// if no Python is reachable and the worker should abort.
-///
-/// Note: this is best-effort. pyo3 is bound to a specific CPython minor
-/// version at link time (the one CI built against — currently 3.12), so the
-/// found Python must be that same series. A 3.11/3.13 install won't satisfy
-/// it even when on PATH; the error message names the expected version.
 fn ensure_python_on_path() -> bool {
     // Case 1: explicit override. pyo3 reads this itself, so we're done.
     if std::env::var_os("PYO3_PYTHON").is_some() {
@@ -64,8 +58,8 @@ fn ensure_python_on_path() -> bool {
     }
 
     // Case 2: walk PATH for a python.exe, remember the first dir that has one.
-    // We don't verify the version here — the right 3.12 may live anywhere on
-    // the user's PATH; prepending its directory is enough for the DLL search.
+    // We don't verify the version — abi3 accepts any 3.8+ install, so whatever
+    // the user has first on PATH is fine.
     let py_dir = std::env::var_os("PATH").and_then(|path| {
         std::env::split_paths(&path).find_map(|dir| {
             let candidate = dir.join(if cfg!(windows) { "python.exe" } else { "python3" });
@@ -78,7 +72,7 @@ fn ensure_python_on_path() -> bool {
     });
 
     if let Some(dir) = py_dir {
-        // Prepend so Windows' DLL search hits this Python's python3XX.dll
+        // Prepend so Windows' DLL search hits this Python's python3.dll
         // before any stale/other version earlier on PATH. Keep the rest of
         // PATH intact so the script can still find its own tools.
         let new_path = match std::env::var_os("PATH") {
@@ -95,9 +89,8 @@ fn ensure_python_on_path() -> bool {
     }
 
     // Case 3: no Python reachable. Tell the user in Chinese (the GUI's log
-    // viewer shows worker stderr verbatim), naming the expected version so
-    // they know which one to install.
-    eprintln!("{{\"kind\":\"error\",\"message\":\"未找到 Python 解释器。请安装 Python 3.12 并加入 PATH，或设置 PYO3_PYTHON 环境变量指向 python.exe。\"}}");
+    // viewer shows worker stderr verbatim). abi3 means any 3.8+ works.
+    eprintln!("{{\"kind\":\"error\",\"message\":\"未找到 Python 解释器。请安装 Python 3.8 或更高版本并加入 PATH，或设置 PYO3_PYTHON 环境变量指向 python.exe。\"}}");
     false
 }
 

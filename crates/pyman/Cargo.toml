@@ -23,7 +23,16 @@ serde_json.workspace = true
 # `--worker` / the `pyman-worker` alias); in that role it embeds CPython via
 # pyo3. `auto-initialize` boots the interpreter on first GIL acquisition,
 # which only happens in worker mode — keeping the GUI free of Python.
-pyo3 = { version = "0.23", features = ["auto-initialize"] }
+#
+# abi3-py38: build against CPython's STABLE ABI (minimum 3.8) so a single
+# build loads whatever Python the user has on PATH (3.8..3.13+) via the
+# version-agnostic `python3.dll`, instead of being bound to a specific minor
+# version's `python3XX.dll`. This is what lets pyman.exe run on a machine with
+# any installed Python, not just the exact one it was built against.
+# generate-import-lib: pyo3 synthesizes the `python3.dll` import library
+# at build time, so the build needs NO system Python installed (great for CI
+# and for clean contributor machines).
+pyo3 = { version = "0.23", features = ["auto-initialize", "abi3-py38", "generate-import-lib"] }
 # Formatting the per-line wall-clock timestamps in the log viewer (local time).
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # Memory-map the CJK system font instead of reading its (often ~40MB) bytes

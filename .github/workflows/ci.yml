@@ -37,21 +37,13 @@ jobs:
       - name: Cache cargo registry + build artifacts
         uses: Swatinem/rust-cache@v2
 
-      # pyo3 is built with the default (non-abi3) feature set, which links
-      # against the *installed* CPython instead of bundling a stable ABI. So
-      # CPython must be present on the runner. windows-latest comes with Python
-      # preinstalled, but we pin a version explicitly so a runner image change
-      # can't silently break the build.
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
+      # No setup-python needed: pyo3 builds against the abi3 stable ABI and
+      # generate-import-lib synthesizes the python3.dll import library at build
+      # time, so the build is fully self-contained — no system Python required.
       - name: Show toolchain versions
         run: |
           cargo --version
           rustc --version
-          python --version
 
       - name: Build (release)
         run: cargo build --release --locked
@@ -76,11 +68,6 @@ jobs:
 
       - name: Cache cargo registry + build artifacts
         uses: Swatinem/rust-cache@v2
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
 
       - name: Build (release)
         run: cargo build --release --locked
