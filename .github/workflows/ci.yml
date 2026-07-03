@@ -1,0 +1,99 @@
+# CI for PyMan.
+#
+# Builds the single `pyman.exe` binary on Windows. Two jobs:
+#   - build:   runs on every push/PR/tag — compiles the release binary and
+#              uploads it as a workflow artifact (downloadable from the run
+#              page). Catches regressions as early as possible.
+#   - release: runs ONLY on tags (v*) — builds the same binary and attaches
+#              it to a GitHub Release. Gated on the build job.
+#
+# Why Windows-only: the app targets Windows — build.rs sets the GUI subsystem
+# for it, font.rs looks up msyh.ttc / SimHei in %WINDIR%\Fonts, and supervisor
+# uses CREATE_NO_WINDOW. The cross-platform cfg guards let it compile on other
+# OSes, but the runtime experience is Windows-tuned, so CI focuses there.
+
+name: build
+
+on:
+  push:
+    branches: [master, main]
+    tags: ["v*"]
+  pull_request:
+    branches: [master, main]
+  workflow_dispatch: # Allow manual runs from the Actions tab.
+
+permissions:
+  contents: write # release job needs this to upload assets via softprops/action-gh-release.
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      # pyo3 is built with the default (non-abi3) feature set, which links
+      # against the *installed* CPython instead of bundling a stable ABI. So
+      # CPython must be present on the runner. windows-latest comes with Python
+      # preinstalled, but we pin a version explicitly so a runner image change
+      # can't silently break the build.
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Show toolchain versions
+        run: |
+          cargo --version
+          rustc --version
+          python --version
+
+      - name: Build (release)
+        run: cargo build --release --locked
+
+      - name: Upload pyman.exe (artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: pyman-windows-${{ github.sha }}
+          path: target/release/pyman.exe
+          if-no-files-found: error
+
+  # Release only on version tags (v*). Skips for plain branch pushes / PRs.
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build (release)
+        run: cargo build --release --locked
+
+      - name: Get tag name
+        id: tag
+        shell: bash
+        run: echo "name=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release and upload pyman.exe
+        uses: softprops/action-gh-release@v2
+        with:
+          files: target/release/pyman.exe
+          name: ${{ steps.tag.outputs.name }}
+          generate_release_notes: true # Auto-generate from commits since last tag.
+          fail_on_unmatched_files: true
