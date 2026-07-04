@@ -108,15 +108,85 @@ pub struct ScriptTask {
 impl ScriptTask {
     /// Spawn a worker for `config`. Returns the task on success.
     ///
-    /// Each worker is just **this same binary** re-executed with the `--worker`
-    /// flag (see `main.rs`), so a release bundle is a single `pyman[.exe]`:
-    /// no separate worker binary to locate or ship.
+    /// The worker is the **separate** `pyman-worker` binary (the only place
+    /// pyo3 is linked), baked into this GUI exe at build time and extracted to
+    /// the user data dir at runtime (see [`crate::embed`]). So a release
+    /// bundle is still a single `pyman[.exe]` to download, while keeping
+    /// `python3.dll` out of the GUI's import table so the GUI starts even on
+    /// machines without Python.
     pub fn spawn(id: u64, config: TaskConfig) -> std::io::Result<Self> {
-        let worker = locate_worker();
+        // The worker links python3.dll as a hard import, so the loader must
+        // find python3.dll at worker startup (before the worker's main runs).
+        // We locate a real Python install directory NOW, in the GUI process,
+        // and inject it into the child's PATH so the loader resolves
+        // python3.dll from there. If we can't find one, we don't even spawn
+        // the worker — it would exit 127 immediately, which would look like an
+        // opaque crash. Instead we synthesize a Failed task with a friendly
+        // message in the log.
+        let py_dir = crate::worker::find_python_on_path();
+        if py_dir.is_none() {
+            let log = Arc::new(Mutex::new(LogBuffer::new()));
+            log.lock().unwrap().push(
+                Stream::Stderr,
+                crate::worker::NO_PYTHON_MSG.to_string(),
+            );
+            return Ok(ScriptTask {
+                id,
+                config,
+                state: TaskState::Failed,
+                started_ms: now_ms(),
+                ended_ms: Some(now_ms()),
+                exit_code: None,
+                log,
+                child: None,
+            });
+        }
+
+        // Make sure the worker binary is on disk (extracted from our embedded
+        // copy on first run / when stale). This, not find_python_on_path, is
+        // the failure that shows up if the data dir isn't writable.
+        let worker = match crate::embed::ensure_worker() {
+            Ok(p) => p,
+            Err(msg) => {
+                let log = Arc::new(Mutex::new(LogBuffer::new()));
+                log.lock().unwrap().push(Stream::Stderr, msg);
+                return Ok(ScriptTask {
+                    id,
+                    config,
+                    state: TaskState::Failed,
+                    started_ms: now_ms(),
+                    ended_ms: Some(now_ms()),
+                    exit_code: None,
+                    log,
+                    child: None,
+                });
+            }
+        };
+
         let mut cmd = Command::new(&worker);
+        // The worker tolerates a leading --worker flag (it strips it if
+        // present), so pass it for clarity / parity with direct invocation.
         cmd.arg("--worker");
         cmd.arg(&config.script);
         cmd.args(&config.args);
+
+        // Prepend the Python directory to the child's PATH so the loader finds
+        // python3.dll at startup. We build the PATH from the current env so the
+        // worker still sees the rest of the user's tools.
+        if let Some(dir) = &py_dir {
+            let sep = if cfg!(windows) { ";" } else { ":" };
+            let new_path = match std::env::var_os("PATH") {
+                Some(existing) => {
+                    let mut s = dir.as_os_str().to_owned();
+                    s.push(sep);
+                    s.push(&existing);
+                    s
+                }
+                None => dir.as_os_str().to_owned(),
+            };
+            cmd.env("PATH", new_path);
+        }
+
         // Merge stderr into stdout via a single piped handle so ordering is
         // preserved and the UI sees a single coherent stream. We tag each
         // line with its origin below.
@@ -260,20 +330,4 @@ fn spawn_reader<R: std::io::Read + Send + 'static>(
             }
         })
         .expect("spawn reader thread");
-}
-
-/// Resolve the executable to re-spawn in worker mode.
-///
-/// The worker role lives inside the very same binary (dispatched in `main.rs`
-/// via `--worker`), so we normally just re-exec `current_exe()`. We fall back
-/// to `pyman` (resolved through PATH) if `current_exe()` is unavailable — this
-/// can happen under unusual launchers — so the spawn still has a fighting
-/// chance instead of failing outright.
-fn locate_worker() -> PathBuf {
-    if let Ok(exe) = std::env::current_exe() {
-        if !exe.as_os_str().is_empty() {
-            return exe;
-        }
-    }
-    PathBuf::from("pyman")
 }

@@ -2561,9 +2561,16 @@ dependencies = [
  "egui",
  "image",
  "memmap2",
- "pyo3",
  "rfd",
  "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "pyman-worker"
+version = "0.1.0"
+dependencies = [
+ "pyo3",
  "serde_json",
 ]
 

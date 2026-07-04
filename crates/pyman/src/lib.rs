@@ -1,12 +1,17 @@
-//! Library facade for pyman.
+//! Library facade for pyman (the GUI crate).
 //!
-//! The binary entry point (`main.rs`) is a thin dispatcher: it either runs the
-//! egui GUI (default) or, when invoked with `--worker` (or as `pyman-worker`),
-//! takes the script-runner role implemented in the [`worker`] module. The
-//! non-UI modules here are also `pub` so integration tests (and future
-//! tooling) can use them directly.
+//! PyMan is split across two crates so the GUI never links CPython:
+//!   * `pyman` (this crate) — the egui GUI + supervisor. No pyo3, no
+//!     `python3.dll` import, so it starts on machines without Python.
+//!   * `pyman-worker` — the only place pyo3 is linked; its compiled binary is
+//!     embedded into this crate's exe at build time (see `build.rs` + `embed`)
+//!     and spawned per running script.
+//!
+//! The binary entry point (`main.rs`) runs the GUI. The non-UI modules here
+//! are `pub` so integration tests (and future tooling) can use them directly.
 
 pub mod app;
+pub mod embed;
 pub mod font;
 pub mod history;
 pub mod icon;
