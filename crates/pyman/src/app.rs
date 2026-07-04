@@ -112,10 +112,34 @@ impl Default for PymanApp {
 }
 
 impl PymanApp {
-    /// Parse the args box. Quotes are not supported; keep it simple. Empty
-    /// fields are dropped.
+    /// Parse the args box. Tokens are whitespace-separated; a token may be
+    /// wrapped in double quotes to keep its internal spaces (so `-c "print(1)"`
+    /// yields two args, not three). No escaping — a bare backslash or quote is
+    /// literal. Empty input yields no args. This is just enough shell flavor for
+    /// the CLI mode (`python <args>`), which needs grouped arguments like
+    /// `-c "..."` to work; plain space-separated values behave exactly as
+    /// before.
     fn parse_args(s: &str) -> Vec<String> {
-        s.split_whitespace().map(String::from).collect()
+        let mut out = Vec::new();
+        let mut cur = String::new();
+        let mut in_quotes = false;
+        for ch in s.chars() {
+            match ch {
+                '"' => in_quotes = !in_quotes,
+                c if c.is_whitespace() => {
+                    if in_quotes {
+                        cur.push(c);
+                    } else if !cur.is_empty() {
+                        out.push(std::mem::take(&mut cur));
+                    }
+                }
+                c => cur.push(c),
+            }
+        }
+        if !cur.is_empty() {
+            out.push(cur);
+        }
+        out
     }
 
     /// Persist the current entries to disk. Centralized so every mutation
@@ -132,18 +156,32 @@ impl PymanApp {
 
     fn add_entry(&mut self) {
         let path = self.script_input.trim().to_string();
-        if path.is_empty() {
-            self.flash = Some("请先填写脚本路径".into());
-            return;
-        }
-        let p = std::path::PathBuf::from(&path);
-        if !p.exists() {
-            self.flash = Some(format!("脚本文件不存在: {path}"));
-            return;
-        }
-        let config = TaskConfig {
-            script: p,
-            args: Self::parse_args(&self.args_input),
+        let args = Self::parse_args(&self.args_input);
+
+        // Two add modes:
+        //   * Script mode (default): a real script path is given.
+        //   * CLI mode: the path is left empty and `args` holds Python's own
+        //     command line (e.g. `-m http.server`). We then run `python <args>`
+        //     instead of a script file (see `supervisor::ScriptTask::spawn`).
+        let config = if path.is_empty() {
+            if args.is_empty() {
+                self.flash = Some(
+                    "脚本路径为空时，请在『参数』里填写要传给 python 的参数（例如 -m http.server）。".into(),
+                );
+                return;
+            }
+            TaskConfig {
+                // Empty PathBuf is the CLI-mode marker (see TaskConfig::is_cli_mode).
+                script: std::path::PathBuf::new(),
+                args,
+            }
+        } else {
+            let p = std::path::PathBuf::from(&path);
+            if !p.exists() {
+                self.flash = Some(format!("脚本文件不存在: {path}"));
+                return;
+            }
+            TaskConfig { script: p, args }
         };
         // The "下次启动自动运行" form option was removed — newly added scripts
         // default to not autostarting. Users can still toggle autostart per
@@ -374,7 +412,7 @@ impl eframe::App for PymanApp {
                 ui.horizontal(|ui| {
                     ui.label("脚本路径:");
                     ui.text_edit_singleline(&mut self.script_input)
-                        .on_hover_text("Python 脚本的完整路径，例如 C:/scripts/foo.py");
+                        .on_hover_text("Python 脚本的完整路径，例如 C:/scripts/foo.py；留空则把『参数』作为 python 的命令行参数运行（例如 -m http.server）");
                     // Native OS file-open dialog. Synchronous (rfd::FileDialog
                     // blocks this thread until the user picks or cancels); that's
                     // fine for a desktop tool — the brief UI freeze during the
@@ -409,7 +447,7 @@ impl eframe::App for PymanApp {
                 ui.horizontal(|ui| {
                     ui.label("参数:");
                     ui.text_edit_singleline(&mut self.args_input)
-                        .on_hover_text("空格分隔的参数，会传给脚本的 sys.argv");
+                        .on_hover_text("空格分隔。脚本模式：传给脚本的 sys.argv；脚本路径留空时：作为 python 的命令行参数（支持 -m 模块名、-c \"代码\" 等，双引号可分组）");
                 });
                 ui.horizontal(|ui| {
                     if ui.button("▶ 添加并启动").clicked() {
@@ -434,8 +472,11 @@ impl eframe::App for PymanApp {
                     Some(e) if e.task.is_some() => draw_log(ui, e.task.as_ref().unwrap()),
                     Some(e) => {
                         ui.label(format!("#{}  {}", e.id, e.name));
-                        ui.label(format!("路径: {}", e.config.script.display()));
-                        if !e.config.args.is_empty() {
+                        // CLI mode (empty path) folds its args into describe()
+                        // as `python <args>`, so a single "运行: ..." line is
+                        // enough; script mode shows the path then the args row.
+                        ui.label(format!("运行: {}", e.config.describe()));
+                        if !e.config.is_cli_mode() && !e.config.args.is_empty() {
                             ui.label(format!("参数: {}", e.config.args.join(" ")));
                         }
                         ui.separator();
@@ -495,7 +536,7 @@ fn draw_log(ui: &mut egui::Ui, task: &ScriptTask) {
     let header = format!(
         "#{}  {}  {}",
         task.id,
-        task.config.script.display(),
+        task.config.describe(),
         match task.state {
             TaskState::Running => "运行中…".to_string(),
             TaskState::Finished => format!("完成 (exit={})", task.exit_code.unwrap_or(0)),
@@ -504,7 +545,9 @@ fn draw_log(ui: &mut egui::Ui, task: &ScriptTask) {
         }
     );
     ui.label(egui::RichText::new(&header).strong());
-    if !task.config.args.is_empty() {
+    // CLI mode's describe() already shows `python <args>`, so only print the
+    // args row in script mode (where it's separate from the path header).
+    if !task.config.is_cli_mode() && !task.config.args.is_empty() {
         ui.label(format!("参数: {}", task.config.args.join(" ")));
     }
 
@@ -663,4 +706,43 @@ enum TaskAction {
     Stop(u64),
     Remove(u64),
     ToggleAutostart(u64),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_args_plain_whitespace() {
+        // Backwards compat: bare space-separated tokens, empty fields dropped.
+        assert_eq!(
+            PymanApp::parse_args("  -m  http.server  "),
+            vec!["-m".to_string(), "http.server".to_string()]
+        );
+        assert!(PymanApp::parse_args("   ").is_empty());
+        assert!(PymanApp::parse_args("").is_empty());
+    }
+
+    #[test]
+    fn parse_args_quotes_group_internal_spaces() {
+        // CLI mode needs grouped args like `-c "print(1 + 2)"` to stay one arg.
+        assert_eq!(
+            PymanApp::parse_args(r#"-c "print(1 + 2)""#),
+            vec!["-c".to_string(), "print(1 + 2)".to_string()]
+        );
+        // A quote in the middle doesn't start a group; only a `"` toggles.
+        assert_eq!(
+            PymanApp::parse_args(r#"say "a b" tail"#),
+            vec!["say".to_string(), "a b".to_string(), "tail".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_args_unclosed_quote_keeps_rest() {
+        // A stray unclosed quote just gathers the remainder — lenient, no panic.
+        assert_eq!(
+            PymanApp::parse_args(r#"-c "print(1)"#),
+            vec!["-c".to_string(), "print(1)".to_string()]
+        );
+    }
 }

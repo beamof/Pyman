@@ -1,25 +1,26 @@
-//! Locate a usable CPython install for the worker child process.
+//! Locate a usable CPython install for the supervisor to spawn.
 //!
-//! The GUI crate no longer links pyo3 (the CPython embedding lives in the
-//! separate `pyman-worker` crate / binary). What stays here is the *discovery*
-//! logic the supervisor uses to find a real Python install directory before
-//! spawning a worker: the worker links `python3.dll` as a hard load-time
-//! import, so the Windows loader must find `python3.dll` at worker **process
-//! startup** — before `main` even runs. Any PATH fixup done *inside* the
-//! worker is too late; the process exits 127 before its code executes.
+//! The GUI links no pyo3 and embeds no CPython — every script (and every
+//! `python <args>` in CLI mode) runs as an ordinary child process spawned by
+//! the supervisor. What lives here is the *discovery* logic the supervisor
+//! uses to resolve the interpreter before spawning: [`find_python_on_path`]
+//! returns a real install *directory* (used to prepend Python to the child's
+//! PATH so `import`s and nested child processes resolve it), and
+//! [`find_python_exe`] returns the interpreter *binary* to actually launch.
 //!
-//! So the supervisor calls [`find_python_on_path`] *before* spawning the
-//! worker and injects the returned directory into the child's `PATH`
-//! (see `supervisor::ScriptTask::spawn`), letting the loader resolve
-//! `python3.dll` from there on startup.
+//! Filtering out the Windows Store App Execution Alias stub is still important
+//! even though we no longer link `python3.dll`: the stub is a zero-byte
+//! reparse point that pops the Store install UI instead of running the script,
+//! so picking it would silently do nothing.
 
-/// Find a real CPython install directory the worker can use.
+/// Find a real CPython install directory.
 ///
 /// "Real" means the directory contains both `python.exe` AND `python3.dll`.
 /// This dual check filters out the Windows Store App Execution Alias stubs
 /// (`%LOCALAPPDATA%\Microsoft\WindowsApps\python.exe`), which are zero-byte
 /// reparse points with no `python3.dll` beside them and would otherwise win
-/// the "first python.exe on PATH" race.
+/// the "first python.exe on PATH" race — and launch the Store instead of the
+/// interpreter.
 ///
 /// Returns the directory, or `None` if no usable Python is found. The
 /// supervisor surfaces that as a friendly error to the user.
@@ -42,6 +43,28 @@ pub fn find_python_on_path() -> Option<std::path::PathBuf> {
             }
         })
     })
+}
+
+/// Resolve the interpreter executable itself, or `None` if no usable Python is
+/// reachable. Used by the supervisor's CLI mode (script path empty ⇒ run
+/// `python <args>` directly), which needs the interpreter binary — not just its
+/// directory — to spawn. Falls back to the same discovery rules as
+/// [`find_python_on_path`] so the worker (PATH injection) and the CLI child
+/// (direct spawn) agree on *which* Python is used.
+pub fn find_python_exe() -> Option<std::path::PathBuf> {
+    let dir = find_python_on_path()?;
+    // On Windows the binary is unambiguously `python.exe`. On Unix a real dir
+    // may have only `python3` or only `python` (see `is_real_python_dir`), so we
+    // prefer `python3` and fall back to whichever is actually present.
+    if cfg!(windows) {
+        Some(dir.join("python.exe"))
+    } else {
+        ["python3", "python"]
+            .iter()
+            .map(|n| dir.join(n))
+            .find(|p| p.is_file())
+            .or(Some(dir.join("python3")))
+    }
 }
 
 /// Friendly Chinese message shown when no usable Python is reachable. Exposed

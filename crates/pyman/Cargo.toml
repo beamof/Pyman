@@ -9,9 +9,7 @@ license.workspace = true
 name = "pyman"
 path = "src/main.rs"
 
-[build-dependencies]
-# (none) — build.rs shells out to `cargo` itself to build the worker crate
-# into a separate target dir (see build.rs), so it needs no Rust crates.
+# No build-dependencies: build.rs only sets the Windows subsystem link flags.
 
 [dependencies]
 eframe = "0.29"

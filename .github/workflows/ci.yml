@@ -1,10 +1,10 @@
 # CI for PyMan.
 #
 # Builds the single `pyman.exe` binary on Windows. Two jobs:
-#   - build:   runs on every push/PR/tag — compiles the release binary (which
-#              embeds the `pyman-worker` exe at build time), runs the headless
-#              self-test to validate the spawn→stream→exit pipeline, and uploads
-#              `pyman.exe` as a workflow artifact. Catches regressions early.
+#   - build:   runs on every push/PR/tag — compiles the release binary, runs
+#              the headless self-test to validate the spawn→stream→exit
+#              pipeline, and uploads `pyman.exe` as a workflow artifact.
+#              Catches regressions early.
 #   - release: runs ONLY on tags (v*) — builds the same binary and attaches
 #              it to a GitHub Release. Gated on the build job.
 #
@@ -13,10 +13,9 @@
 # uses CREATE_NO_WINDOW. The cross-platform cfg guards let it compile on other
 # OSes, but the runtime experience is Windows-tuned, so CI focuses there.
 #
-# Single download file: although the workspace has two crates (the GUI `pyman`
-# and the worker `pyman-worker`), the worker binary is `include_bytes!`'d into
-# the GUI exe at build time (see crates/pyman/build.rs), so the release bundle
-# is still one self-contained `pyman.exe`.
+# Single self-contained exe: the GUI spawns the real `python` interpreter as a
+# child process per script and embeds no CPython itself, so there is no second
+# binary to ship — the release bundle is just `pyman.exe`.
 
 name: build
 
@@ -43,21 +42,20 @@ jobs:
       - name: Cache cargo registry + build artifacts
         uses: Swatinem/rust-cache@v2
 
-      # No setup-python needed to BUILD: pyo3 builds against the abi3 stable
-      # ABI and generate-import-lib synthesizes the python3.dll import library
-      # at build time, so the build is fully self-contained. Python IS needed
-      # to RUN the self-test below (the worker embeds CPython and runs a real
-      # .py), so we set it up before that step.
+      # No setup-python needed to BUILD: the GUI spawns the real `python` as a
+      # child process and links no pyo3, so the build is fully self-contained
+      # and needs no Python toolchain. Python IS needed to RUN the self-test
+      # below (it spawns python.exe to run a real .py), so we set it up before
+      # that step.
       - name: Show toolchain versions
         run: |
           cargo --version
           rustc --version
 
       - name: Build (release)
-        # `cargo build` builds BOTH crates: pyman-worker first (its build.rs
-        # for the GUI shells out to build it into a separate target dir), then
-        # pyman, which embeds the just-built worker. Result: one self-contained
-        # pyman.exe with the worker baked in.
+        # `cargo build` compiles the single `pyman` crate. There is no worker
+        # binary to build or embed anymore — the GUI spawns python.exe at run
+        # time. Result: one self-contained pyman.exe.
         run: cargo build --release --locked
 
       - name: Set up Python (for self-test)
@@ -66,9 +64,9 @@ jobs:
           python-version: "3.x"
 
       - name: Run self-test
-        # Headless end-to-end check: extract the embedded worker, spawn it,
-        # run examples/hello.py, and assert the captured log matches. Exits
-        # non-zero on failure, failing the build.
+        # Headless end-to-end check: spawn python.exe, run examples/hello.py,
+        # and assert the captured log matches. Exits non-zero on failure,
+        # failing the build.
         run: ./target/release/pyman.exe --self-test
 
       - name: Upload pyman.exe (artifact)

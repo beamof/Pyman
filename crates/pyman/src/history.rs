@@ -31,19 +31,26 @@ pub struct HistoryEntry {
 }
 
 impl HistoryEntry {
-    /// Build an entry from form input. Name falls back to the script's file
-    /// name so the list isn't full of long absolute paths.
+    /// Build an entry from form input. The name defaults to something short and
+    /// recognizable in the list: the script's file name in script mode, or
+    /// `python <args>` in CLI mode (empty path) — e.g. `-m http.server`
+    /// becomes `python -m http.server`, so two CLI entries with different args
+    /// stay distinguishable. A caller-provided non-empty `name` always wins.
     pub fn from_input(name: Option<&str>, config: TaskConfig, autostart: bool) -> Self {
         let name = name
             .filter(|s| !s.trim().is_empty())
             .map(str::to_owned)
             .unwrap_or_else(|| {
-                config
-                    .script
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| config.script.display().to_string())
+                if config.is_cli_mode() {
+                    config.describe()
+                } else {
+                    config
+                        .script
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| config.script.display().to_string())
+                }
             });
         Self {
             name,

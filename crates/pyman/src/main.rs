@@ -1,22 +1,21 @@
 //! pyman: the GUI entry point.
 //!
-//! PyMan is a single-binary download but *two* crates under the hood. This
-//! binary is the egui manager window only; it does NOT link pyo3, so its
-//! loader never demands `python3.dll` and the GUI starts even on machines
-//! without Python installed. The script-execution worker is a separate
-//! `pyman-worker` binary (the sole place CPython is linked), embedded into
-//! this exe at build time (`build.rs` + `embed`) and spawned one-process-per-
-//! script by the supervisor — so a crashing script still can't take down the
-//! UI, and distribution stays a single downloaded file.
+//! This binary is the egui manager window. It does NOT link pyo3 and embeds no
+//! CPython, so its loader never demands `python3.dll` and the GUI starts even
+//! on machines without Python installed. Scripts (and `python <args>` in CLI
+//! mode) run as ordinary child processes spawned by the supervisor — one
+//! `python` process per running script — so a crashing script still can't take
+//! down the UI, and there's no separate worker binary or embedded bytes: the
+//! whole thing is a single self-contained exe.
 //!
 //! On Windows the GUI is linked against the "windows" subsystem (see
 //! `build.rs`) so launching it does not pop up a console window — while
 //! keeping a normal `main` so `--self-test` output works when run from an
 //! existing terminal.
 //!
-//! All logic (app UI, history persistence, process supervision, worker
-//! discovery, embedded-worker extraction) lives in the library part of this
-//! crate (`lib.rs`); this file is the thin entry point.
+//! All logic (app UI, history persistence, process supervision, Python
+//! discovery) lives in the library part of this crate (`lib.rs`); this file is
+//! the thin entry point.
 
 use pyman::{app, supervisor};
 
