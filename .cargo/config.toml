@@ -1,0 +1,12 @@
+# Cargo 构建配置。
+#
+# 静态链接 C 运行时（CRT）：MSVC 工具链默认动态链接 vcruntime140.dll /
+# msvcp140.dll，分发到干净机器（如 Server 2022 / 精简版 Win10，默认没装
+# VC++ 2015–2022 Redistributable）时，Windows loader 在程序入口跑起来之前
+# 就因为找不到 CRT 而直接退出——表现是双击/命令行运行没反应、Task Manager
+# 没进程、exit code 0。
+#
+# 开 +crt-static 后，CRT 被直接打进 exe，体积增加几 MB，但分发到任何
+# Windows 都不再需要额外装运行时。
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

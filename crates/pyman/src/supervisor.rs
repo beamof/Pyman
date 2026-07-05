@@ -239,8 +239,8 @@ impl ScriptTask {
         self.state == TaskState::Running && self.stdin.is_some()
     }
 
-    /// Close stdin on the child (sends EOF). Used by the UI's "close stdin"
-    /// button to unblock a script waiting on `input()` without killing it.
+    /// Close stdin on the child (sends EOF). Called by `stop()` before killing
+    /// the process so a blocked reader on the child side unblocks promptly.
     pub fn close_stdin(&mut self) {
         // Replacing with None drops the Arc (and the ChildStdin within once the
         // last clone is gone), which closes the pipe → the child sees EOF.

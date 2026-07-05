@@ -286,15 +286,6 @@ impl PymanApp {
             }
         }
     }
-
-    /// Close the running task's stdin (send EOF) without stopping the task.
-    fn close_stdin(&mut self, id: u64) {
-        if let Some(e) = self.entries.iter_mut().find(|e| e.id == id) {
-            if let Some(t) = e.task.as_mut() {
-                t.close_stdin();
-            }
-        }
-    }
 }
 
 impl eframe::App for PymanApp {
@@ -525,7 +516,6 @@ impl eframe::App for PymanApp {
                 TaskAction::Remove(id) => self.remove_entry(id),
                 TaskAction::ToggleAutostart(id) => self.toggle_autostart(id),
                 TaskAction::SendStdin(id, text) => self.send_stdin(id, text),
-                TaskAction::CloseStdin(id) => self.close_stdin(id),
             }
         }
     }
@@ -649,8 +639,17 @@ fn draw_log(ui: &mut egui::Ui, task: &ScriptTask, action: &mut Option<TaskAction
     });
     ui.separator();
 
+    // Cap the log scroll area's height so it does NOT greedily consume the
+    // entire central panel and push the stdin input box below the visible
+    // region. We reserve room for the input row drawn afterwards: a separator
+    // + a ~18px text field + the 发送/关闭 stdin buttons ≈ 40px, plus a small
+    // margin. Without this cap the input box would be forever scrolled out of
+    // view (the original bug: ScrollArea defaults to max_height = infinity).
+    let input_row_height = 44.0;
+    let log_max_height = (ui.available_height() - input_row_height).max(80.0);
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
+        .max_height(log_max_height)
         .stick_to_bottom(true)
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -745,11 +744,11 @@ fn draw_stdin_input(ui: &mut egui::Ui, task: &ScriptTask, action: &mut Option<Ta
 
     ui.horizontal(|ui| {
         ui.label("输入:");
-        // Reserve room for the two action buttons ("发送" + "关闭 stdin (EOF)"
-        // + spacing, ~190px) so the text field takes the rest without pushing
-        // them off the row. egui's immediate-mode layout has no look-ahead, so
-        // we subtract a constant; the floor keeps it sane on very narrow UIs.
-        let field_width = (ui.available_width() - 190.0).max(120.0);
+        // Reserve room for the 发送 button + spacing (~80px) so the text field
+        // takes the rest without pushing it off the row. egui's immediate-mode
+        // layout has no look-ahead, so we subtract a constant; the floor keeps
+        // it sane on very narrow UIs.
+        let field_width = (ui.available_width() - 80.0).max(120.0);
         let resp = ui.add(
             egui::TextEdit::singleline(&mut input.draft)
                 .desired_width(field_width)
@@ -775,8 +774,8 @@ fn draw_stdin_input(ui: &mut egui::Ui, task: &ScriptTask, action: &mut Option<Ta
 
         // Enter (when focused) sends the line; the 发送 button is the mouse
         // equivalent. `&&` short-circuits so the button is only drawn when the
-        // input is actually open — when closed we render neither button, just
-        // the disabled field above with its hint.
+        // input is actually open — when closed we render the disabled field
+        // above with its hint and no button.
         let enter_pressed = resp.lost_focus()
             && resp.ctx.input(|i| i.key_pressed(egui::Key::Enter));
         if open
@@ -790,11 +789,6 @@ fn draw_stdin_input(ui: &mut egui::Ui, task: &ScriptTask, action: &mut Option<Ta
             *action = Some(TaskAction::SendStdin(task.id, text));
             // Reclaim focus so the user can keep typing the next line.
             resp.request_focus();
-        }
-        // Close stdin: sends EOF without killing the task. Useful for scripts
-        // that read until EOF instead of using a sentinel.
-        if open && ui.button("关闭 stdin (EOF)").clicked() {
-            *action = Some(TaskAction::CloseStdin(task.id));
         }
     });
 
@@ -937,8 +931,6 @@ enum TaskAction {
     /// Send the contents of the per-task input box to the task's stdin.
     /// Carries (id, text). Empty input is dropped by the action site.
     SendStdin(u64, String),
-    /// Close the task's stdin (send EOF) without killing the task.
-    CloseStdin(u64),
 }
 
 #[cfg(test)]

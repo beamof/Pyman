@@ -11,3 +11,10 @@ license = "MIT"
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# Release profile（workspace 级）：lto + codegen-units=1，体积更小、跨机分发更稳。
+# CRT 静态链接放在 .cargo/config.toml 的 target cfg 里，让 release/debug 都生效，
+# 且无需 nightly 的 profile-rustflags。
+[profile.release]
+lto = true
+codegen-units = 1

@@ -3,7 +3,8 @@
 
 Used to demonstrate PyMan's input feature — type in the bottom input box,
 press Enter, and your line is sent to this script's stdin and echoed back
-to the log. Type `quit` (or close stdin) to exit.
+to the log. Type `quit` to exit (the script also exits cleanly on EOF, which
+happens when you stop the task).
 """
 import sys
 
