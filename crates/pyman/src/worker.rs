@@ -1,19 +1,18 @@
-//! Locate a usable CPython install for the supervisor to spawn.
+//! Locate a usable Python install for the supervisor to spawn.
 //!
-//! The GUI links no pyo3 and embeds no CPython — every script (and every
-//! `python <args>` in CLI mode) runs as an ordinary child process spawned by
-//! the supervisor. What lives here is the *discovery* logic the supervisor
-//! uses to resolve the interpreter before spawning: [`find_python_on_path`]
-//! returns a real install *directory* (used to prepend Python to the child's
-//! PATH so `import`s and nested child processes resolve it), and
-//! [`find_python_exe`] returns the interpreter *binary* to actually launch.
+//! Every script (and every `python <args>` in CLI mode) runs as an ordinary
+//! child process spawned by the supervisor. What lives here is the *discovery*
+//! logic the supervisor uses to resolve the interpreter before spawning:
+//! [`find_python_on_path`] returns a real install *directory* (used to prepend
+//! Python to the child's PATH so `import`s and nested child processes resolve
+//! it), and [`find_python_exe`] returns the interpreter *binary* to actually
+//! launch.
 //!
-//! Filtering out the Windows Store App Execution Alias stub is still important
-//! even though we no longer link `python3.dll`: the stub is a zero-byte
-//! reparse point that pops the Store install UI instead of running the script,
-//! so picking it would silently do nothing.
+//! Filtering out the Windows Store App Execution Alias stub is important: the
+//! stub is a zero-byte reparse point that pops the Store install UI instead of
+//! running the script, so picking it would silently do nothing.
 
-/// Find a real CPython install directory.
+/// Find a real Python install directory.
 ///
 /// "Real" means the directory contains both `python.exe` AND `python3.dll`.
 /// This dual check filters out the Windows Store App Execution Alias stubs
@@ -25,9 +24,9 @@
 /// Returns the directory, or `None` if no usable Python is found. The
 /// supervisor surfaces that as a friendly error to the user.
 pub fn find_python_on_path() -> Option<std::path::PathBuf> {
-    // PYO3_PYTHON override: the user pointed pyo3 at a specific interpreter.
-    // Its directory is where python3.dll lives.
-    if let Some(exe) = std::env::var_os("PYO3_PYTHON") {
+    // PYMAN_PYTHON override: the user pointed to a specific interpreter. Its
+    // directory is where python3.dll lives.
+    if let Some(exe) = std::env::var_os("PYMAN_PYTHON") {
         if let Some(parent) = std::path::Path::new(&exe).parent() {
             if is_real_python_dir(parent) {
                 return Some(parent.to_path_buf());
@@ -71,11 +70,11 @@ pub fn find_python_exe() -> Option<std::path::PathBuf> {
 /// so the supervisor can log it once (rather than the worker failing silently
 /// with exit 127, which would look like an opaque crash).
 pub const NO_PYTHON_MSG: &str =
-    "未找到可用的 Python 解释器。请安装 Python 3.8 或更高版本（安装时勾选 \"Add Python to PATH\"），或设置 PYO3_PYTHON 环境变量指向 python.exe 的完整路径。已扫描 PATH 但未找到同时含 python.exe 与 python3.dll 的目录。";
+    "未找到可用的 Python 解释器。请安装 Python 3.8 或更高版本（安装时勾选 \"Add Python to PATH\"），或设置 PYMAN_PYTHON 环境变量指向 python.exe 的完整路径。已扫描 PATH 但未找到同时含 python.exe 与 python3.dll 的目录。";
 
-/// A directory is a "real" CPython install dir if it has both the interpreter
-/// binary and the abi3 entry shared object. Checking both is what filters out
-/// the Windows Store stub.
+/// A directory is a "real" Python install dir if it has both the interpreter
+/// binary and (on Windows) its shared library. Checking both is what filters
+/// out the Windows Store stub.
 #[cfg(windows)]
 fn is_real_python_dir(dir: &std::path::Path) -> bool {
     dir.join("python.exe").is_file() && dir.join("python3.dll").is_file()

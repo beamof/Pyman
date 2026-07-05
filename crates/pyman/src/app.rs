@@ -268,6 +268,33 @@ impl PymanApp {
         }
         self.persist();
     }
+
+    /// Send a line of user input to the running task's stdin. Empty input is
+    /// dropped (no-op), so pressing Enter on an empty box just clears the field
+    /// without sending a stray newline. Write errors (stdin already closed)
+    /// surface as a flash so the user knows their input didn't go through.
+    fn send_stdin(&mut self, id: u64, text: String) {
+        if text.is_empty() {
+            return;
+        }
+        if let Some(e) = self.entries.iter_mut().find(|e| e.id == id) {
+            if let Some(t) = e.task.as_mut() {
+                if t.write_stdin(&text).is_err() {
+                    self.flash =
+                        Some(format!("#{id} 的输入发送失败：脚本可能已退出或已关闭 stdin"));
+                }
+            }
+        }
+    }
+
+    /// Close the running task's stdin (send EOF) without stopping the task.
+    fn close_stdin(&mut self, id: u64) {
+        if let Some(e) = self.entries.iter_mut().find(|e| e.id == id) {
+            if let Some(t) = e.task.as_mut() {
+                t.close_stdin();
+            }
+        }
+    }
 }
 
 impl eframe::App for PymanApp {
@@ -469,7 +496,7 @@ impl eframe::App for PymanApp {
             ui.heading("日志");
             if let Some(id) = self.selected {
                 match self.entries.iter().find(|e| e.id == id) {
-                    Some(e) if e.task.is_some() => draw_log(ui, e.task.as_ref().unwrap()),
+                    Some(e) if e.task.is_some() => draw_log(ui, e.task.as_ref().unwrap(), &mut action),
                     Some(e) => {
                         ui.label(format!("#{}  {}", e.id, e.name));
                         // CLI mode (empty path) folds its args into describe()
@@ -497,6 +524,8 @@ impl eframe::App for PymanApp {
                 TaskAction::Stop(id) => self.stop_entry(id),
                 TaskAction::Remove(id) => self.remove_entry(id),
                 TaskAction::ToggleAutostart(id) => self.toggle_autostart(id),
+                TaskAction::SendStdin(id, text) => self.send_stdin(id, text),
+                TaskAction::CloseStdin(id) => self.close_stdin(id),
             }
         }
     }
@@ -532,7 +561,7 @@ impl PymanApp {
 /// text in pure black (stdout) / dark-red (stderr) for readability on both
 /// light and dark themes. The text cell is a selectable label, so the user can
 /// drag-select lines and copy them with Ctrl+C.
-fn draw_log(ui: &mut egui::Ui, task: &ScriptTask) {
+fn draw_log(ui: &mut egui::Ui, task: &ScriptTask, action: &mut Option<TaskAction>) {
     let header = format!(
         "#{}  {}  {}",
         task.id,
@@ -652,14 +681,25 @@ fn draw_log(ui: &mut egui::Ui, task: &ScriptTask) {
                         // Body text: pure black for readability (the old
                         // near-white stdout color vanished on light themes).
                         // stderr keeps a distinct dark-red so the two streams
-                        // are still tellable apart at a glance.
+                        // are still tellable apart at a glance; user input is a
+                        // muted blue so the conversation's "I typed this" lines
+                        // read as echoes, not script output.
                         let body_color = match stream {
                             Stream::Stdout => egui::Color32::BLACK,
                             Stream::Stderr => egui::Color32::from_rgb(170, 0, 0),
+                            Stream::Input => egui::Color32::from_rgb(0, 80, 160),
+                        };
+                        // Prefix echoed user input with a chevron so it reads
+                        // as "you typed" rather than blending into the script's
+                        // own stdout. Pure stdout/stderr render as-is.
+                        let display = if *stream == Stream::Input {
+                            format!("» {text}")
+                        } else {
+                            text.clone()
                         };
                         ui.add(
                             egui::Label::new(
-                                egui::RichText::new(text)
+                                egui::RichText::new(display)
                                     .color(body_color)
                                     .family(egui::FontFamily::Monospace),
                             )
@@ -672,6 +712,194 @@ fn draw_log(ui: &mut egui::Ui, task: &ScriptTask) {
                     }
                 });
         });
+
+    // Input box: send lines to the script's stdin. Only meaningful while the
+    // task is running and we still hold an open stdin pipe; once the child is
+    // gone or stdin closed, the box is disabled with an explanatory hint.
+    draw_stdin_input(ui, task, action);
+}
+
+/// Render the per-task stdin input row. Each task keeps its own [`InputState`]
+/// in egui's memory (keyed by task id) so switching between tasks doesn't wipe
+/// half-typed input or its history. Enter (or the 发送 button) sends the line;
+/// Up/Down arrows walk the input history, shell-style.
+fn draw_stdin_input(ui: &mut egui::Ui, task: &ScriptTask, action: &mut Option<TaskAction>) {
+    ui.separator();
+    let open = task.stdin_open();
+    let hint = if open {
+        "在此输入并按回车发送给脚本的 stdin（↑/↓ 选择历史输入）"
+    } else {
+        match task.state {
+            TaskState::Running => "stdin 已关闭，无法再发送输入",
+            _ => "脚本未运行，无法发送输入",
+        }
+    };
+
+    // Input state (draft + history + navigation cursor) is per-task so each
+    // task has its own input line and history that survives switching
+    // selection.
+    let state_key = egui::Id::new(("stdin_input_state", task.id));
+    let mut input: InputState = ui
+        .data(|d| d.get_temp::<InputState>(state_key))
+        .unwrap_or_default();
+
+    ui.horizontal(|ui| {
+        ui.label("输入:");
+        // Reserve room for the two action buttons ("发送" + "关闭 stdin (EOF)"
+        // + spacing, ~190px) so the text field takes the rest without pushing
+        // them off the row. egui's immediate-mode layout has no look-ahead, so
+        // we subtract a constant; the floor keeps it sane on very narrow UIs.
+        let field_width = (ui.available_width() - 190.0).max(120.0);
+        let resp = ui.add(
+            egui::TextEdit::singleline(&mut input.draft)
+                .desired_width(field_width)
+                .hint_text(hint)
+                .interactive(open),
+        );
+
+        // Arrow-key history navigation, shell/readline style. Only consume the
+        // keys while the field is focused so Up/Down keep working elsewhere
+        // (e.g. inside the log selection). The `InputState` methods below are
+        // pure and unit-tested; this branch only feeds them the key events.
+        if open && resp.has_focus() {
+            let ctx = resp.ctx.clone();
+            let up = ctx.input(|i| i.key_pressed(egui::Key::ArrowUp));
+            let down = ctx.input(|i| i.key_pressed(egui::Key::ArrowDown));
+            if up {
+                input.prev_history();
+            }
+            if down {
+                input.next_history();
+            }
+        }
+
+        // Enter (when focused) sends the line; the 发送 button is the mouse
+        // equivalent. `&&` short-circuits so the button is only drawn when the
+        // input is actually open — when closed we render neither button, just
+        // the disabled field above with its hint.
+        let enter_pressed = resp.lost_focus()
+            && resp.ctx.input(|i| i.key_pressed(egui::Key::Enter));
+        if open
+            && (enter_pressed || ui.button("发送").clicked())
+            && !input.draft.trim().is_empty()
+        {
+            let text = std::mem::take(&mut input.draft);
+            // Commit to history BEFORE dispatching the action, so the line is
+            // recorded even if the send later fails (the user still typed it).
+            input.push_history(text.clone());
+            *action = Some(TaskAction::SendStdin(task.id, text));
+            // Reclaim focus so the user can keep typing the next line.
+            resp.request_focus();
+        }
+        // Close stdin: sends EOF without killing the task. Useful for scripts
+        // that read until EOF instead of using a sentinel.
+        if open && ui.button("关闭 stdin (EOF)").clicked() {
+            *action = Some(TaskAction::CloseStdin(task.id));
+        }
+    });
+
+    // Persist the (possibly edited / navigated) input state back to per-task
+    // memory.
+    ui.data_mut(|d| d.insert_temp(state_key, input));
+}
+
+/// Per-task input state: the current draft plus a shell-style history of
+/// previously sent lines and a cursor into it.
+///
+/// Navigation mirrors a terminal:
+///   * `prev_history` (↑) walks toward older entries; the first press saves the
+///     current draft so ↓ all the way back (or past the newest entry) restores
+///     it rather than clobbering it with the latest history line.
+///   * `next_history` (↓) walks toward newer entries; pressing ↓ past the
+///     newest entry returns to the saved draft.
+///   * Editing a recalled line then pressing ↑/↓ again discards the edits
+///     (standard shell behavior — we don't try to merge edits back).
+///
+/// The navigation logic is split into pure methods so it can be unit-tested
+/// without an egui context.
+#[derive(Clone, Default)]
+struct InputState {
+    /// Current text in the input box.
+    draft: String,
+    /// Previously sent lines, oldest first. Bounded to avoid unbounded growth
+    /// from long-running interactive sessions.
+    history: Vec<String>,
+    /// Position in the history navigation, or `None` when not navigating
+    /// (i.e. the user is typing a fresh line). An index of `i` means the draft
+    /// is currently showing `history[i]`.
+    history_pos: Option<usize>,
+    /// The draft as it was before the user first pressed ↑, restored when they
+    /// navigate back below the newest entry.
+    saved_draft: String,
+}
+
+impl InputState {
+    /// Cap on how many sent lines we keep. Match the log buffer's order of
+    /// magnitude (10k lines) — plenty for an interactive session, bounded so a
+    /// runaway script can't grow memory forever.
+    const HISTORY_CAP: usize = 10_000;
+
+    /// Record a sent line. Resets navigation so the next ↑ starts from the
+    /// newest entry. Dedupes a repeat of the immediately previous line (common
+    /// when re-sending the same command) but keeps other duplicates in order,
+    /// matching typical shell history.
+    fn push_history(&mut self, line: String) {
+        if self.history.last().map(String::as_str) != Some(line.as_str()) {
+            self.history.push(line);
+            if self.history.len() > Self::HISTORY_CAP {
+                // Drop the oldest to stay bounded; navigation indices stay
+                // valid because we always reset history_pos below.
+                self.history.remove(0);
+            }
+        }
+        self.history_pos = None;
+        self.saved_draft.clear();
+    }
+
+    /// ↑: move to the previous (older) history entry. On the first press, save
+    /// the current draft so ↓ past the newest entry restores it. No-op when the
+    /// history is empty or we're already at the oldest entry.
+    fn prev_history(&mut self) {
+        if self.history.is_empty() {
+            return;
+        }
+        match self.history_pos {
+            // First press: save draft, jump to newest.
+            None => {
+                self.saved_draft = self.draft.clone();
+                let pos = self.history.len() - 1;
+                self.draft = self.history[pos].clone();
+                self.history_pos = Some(pos);
+            }
+            // Already navigating: move older if possible. Stays put at the
+            // oldest entry (so repeated ↑ doesn't wrap unexpectedly).
+            Some(0) => {}
+            Some(pos) => {
+                let pos = pos - 1;
+                self.draft = self.history[pos].clone();
+                self.history_pos = Some(pos);
+            }
+        }
+    }
+
+    /// ↓: move to the next (newer) history entry. Pressing ↓ past the newest
+    /// entry returns to the saved draft and ends navigation. No-op when not
+    /// navigating.
+    fn next_history(&mut self) {
+        let Some(pos) = self.history_pos else {
+            return;
+        };
+        if pos + 1 >= self.history.len() {
+            // Past the newest entry: restore the pre-navigation draft.
+            self.draft = self.saved_draft.clone();
+            self.history_pos = None;
+            self.saved_draft.clear();
+        } else {
+            let pos = pos + 1;
+            self.draft = self.history[pos].clone();
+            self.history_pos = Some(pos);
+        }
+    }
 }
 
 /// Format a unix-epoch-millis timestamp as local `HH:MM:SS.mmm`.
@@ -706,6 +934,11 @@ enum TaskAction {
     Stop(u64),
     Remove(u64),
     ToggleAutostart(u64),
+    /// Send the contents of the per-task input box to the task's stdin.
+    /// Carries (id, text). Empty input is dropped by the action site.
+    SendStdin(u64, String),
+    /// Close the task's stdin (send EOF) without killing the task.
+    CloseStdin(u64),
 }
 
 #[cfg(test)]
@@ -741,8 +974,94 @@ mod tests {
     fn parse_args_unclosed_quote_keeps_rest() {
         // A stray unclosed quote just gathers the remainder — lenient, no panic.
         assert_eq!(
-            PymanApp::parse_args(r#"-c "print(1)"#),
+            PymanApp::parse_args(r#"-c "print(1)""#),
             vec!["-c".to_string(), "print(1)".to_string()]
         );
+    }
+
+    #[test]
+    fn input_state_history_dedupes_consecutive_repeats() {
+        let mut s = InputState::default();
+        s.push_history("foo".into());
+        s.push_history("foo".into()); // repeat of last → dropped
+        s.push_history("bar".into());
+        assert_eq!(s.history, vec!["foo".to_string(), "bar".to_string()]);
+        // A non-consecutive repeat (foo after bar) is still kept in order.
+        s.push_history("foo".into());
+        assert_eq!(
+            s.history,
+            vec!["foo".to_string(), "bar".to_string(), "foo".to_string()]
+        );
+    }
+
+    #[test]
+    fn input_state_arrow_up_then_down_round_trips() {
+        let mut s = InputState::default();
+        s.push_history("a".into());
+        s.push_history("b".into());
+        s.push_history("c".into());
+        assert_eq!(s.history.len(), 3);
+
+        // Start from a fresh draft, press ↑: draft becomes newest ("c").
+        s.draft = "typed".into();
+        s.prev_history();
+        assert_eq!(s.draft, "c");
+        // ↑ again → "b", again → "a", then stays at oldest.
+        s.prev_history();
+        assert_eq!(s.draft, "b");
+        s.prev_history();
+        assert_eq!(s.draft, "a");
+        s.prev_history(); // already oldest, no wrap
+        assert_eq!(s.draft, "a");
+
+        // ↓ walks back toward newest, then restores the pre-navigation draft.
+        s.next_history();
+        assert_eq!(s.draft, "b");
+        s.next_history();
+        assert_eq!(s.draft, "c");
+        s.next_history(); // past newest → saved draft restored
+        assert_eq!(s.draft, "typed");
+        assert!(s.history_pos.is_none());
+        // ↓ again now that we're back to typing is a no-op.
+        s.next_history();
+        assert_eq!(s.draft, "typed");
+    }
+
+    #[test]
+    fn input_state_first_up_saves_then_down_restores() {
+        // The pre-navigation draft must come back when ↓ past the newest entry,
+        // even with a one-element history.
+        let mut s = InputState::default();
+        s.push_history("only".into());
+        s.draft = "half-typed".into();
+
+        s.prev_history();
+        assert_eq!(s.draft, "only");
+        s.next_history(); // past the single entry → restore
+        assert_eq!(s.draft, "half-typed");
+    }
+
+    #[test]
+    fn input_state_empty_history_up_is_noop() {
+        let mut s = InputState::default();
+        s.draft = "x".into();
+        s.prev_history(); // nothing to navigate to
+        assert_eq!(s.draft, "x");
+        assert!(s.history_pos.is_none());
+    }
+
+    #[test]
+    fn input_state_push_resets_navigation() {
+        // After sending a new line mid-navigation, ↑ should start from the new
+        // newest entry, not from wherever the cursor was.
+        let mut s = InputState::default();
+        s.push_history("a".into());
+        s.push_history("b".into());
+        s.prev_history(); // now showing "b", cursor at index 1
+
+        s.push_history("c".into());
+        assert!(s.history_pos.is_none());
+        s.prev_history(); // first ↑ after send → newest = "c"
+        assert_eq!(s.draft, "c");
     }
 }

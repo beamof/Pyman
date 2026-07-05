@@ -1,12 +1,10 @@
 //! pyman: the GUI entry point.
 //!
-//! This binary is the egui manager window. It does NOT link pyo3 and embeds no
-//! CPython, so its loader never demands `python3.dll` and the GUI starts even
-//! on machines without Python installed. Scripts (and `python <args>` in CLI
-//! mode) run as ordinary child processes spawned by the supervisor — one
-//! `python` process per running script — so a crashing script still can't take
-//! down the UI, and there's no separate worker binary or embedded bytes: the
-//! whole thing is a single self-contained exe.
+//! This binary is the egui manager window. It starts without requiring Python
+//! installed. Scripts (and `python <args>` in CLI mode) run as ordinary child
+//! processes spawned by the supervisor — one `python` process per running
+//! script — so a crashing script still can't take down the UI, and the whole
+//! thing is a single self-contained exe.
 //!
 //! On Windows the GUI is linked against the "windows" subsystem (see
 //! `build.rs`) so launching it does not pop up a console window — while
@@ -106,7 +104,7 @@ fn self_test() -> Result<(), String> {
     }
 
     let ok_state = task.state == TaskState::Finished;
-    let ok_greeting = joined.contains("hello from pyman-worker");
+    let ok_greeting = joined.contains("hello from pyman");
     let ok_argv = joined.contains("selftest");
     let ok_done = joined.contains("done");
 

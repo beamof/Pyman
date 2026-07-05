@@ -3,7 +3,7 @@
 import sys
 import time
 
-print("hello from pyman-worker", flush=True)
+print("hello from pyman", flush=True)
 print(f"sys.argv = {sys.argv}", flush=True)
 
 for i in range(1, 11):

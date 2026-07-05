@@ -1,14 +1,14 @@
-//! Process supervision for per-script worker child processes.
+//! Process supervision for per-script `python` child processes.
 //!
 //! One [`ScriptTask`] exists per running script. Each task owns a child
-//! process — the same `pyman` binary re-executed in worker mode via the
-//! `--worker` flag — and a background thread that reads its merged
-//! stdout/stderr line-by-line into a ring buffer the UI can read.
+//! `python` process (one per running script) and a background thread that
+//! reads its merged stdout/stderr line-by-line into a ring buffer the UI can
+//! read.
 
 use std::collections::VecDeque;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -27,6 +27,10 @@ pub struct LogLine {
 pub enum Stream {
     Stdout,
     Stderr,
+    /// A line the user typed into the input box and sent to the script's
+    /// stdin. Echoed back into the log so the conversation reads naturally —
+    /// without it the user's input is invisible next to the script's output.
+    Input,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -125,21 +129,24 @@ pub struct ScriptTask {
     pub exit_code: Option<i32>,
     pub log: SharedLog,
     child: Option<Child>,
+    /// The script's stdin, captured as a pipe so the UI can feed it lines.
+    /// Behind a Mutex so the UI thread and the supervisor can both reach it
+    /// without aliasing the `&mut ScriptTask` borrow the poll loop holds.
+    /// `None` once the child is gone or stdin has been closed.
+    stdin: Option<Arc<Mutex<ChildStdin>>>,
 }
 
 impl ScriptTask {
     /// Spawn `python` for `config`. Returns the task on success.
     ///
-    /// Both run modes spawn the **real Python interpreter** as a child process
-    /// — the GUI never embeds CPython, so it links no pyo3 and has no
-    /// `python3.dll` load-time dependency (the GUI starts on machines without
-    /// Python). The two modes differ only in how `config` becomes a command
-    /// line; they share one supervisor pipeline (captured stdout/stderr,
-    /// line-buffered log, exit-code polling):
+    /// Both run modes spawn the **real Python interpreter** as a child process;
+    /// the GUI itself needs no Python installed to start. The two modes differ
+    /// only in how `config` becomes a command line; they share one supervisor
+    /// pipeline (captured stdout/stderr, line-buffered log, exit-code polling):
     ///   * **Script mode** (default): `config.script` is a file path →
     ///     `python <script> <args>`. Running the file directly via the
-    ///     interpreter is exactly what the old embedded worker did (read file,
-    ///     set `sys.argv`, exec as `__main__`), so behavior is unchanged.
+    ///     interpreter is exactly what a user gets in a terminal (the file is
+    ///     run as `__main__` with `sys.argv` set), so behavior is unchanged.
     ///   * **CLI mode** (`config.is_cli_mode()`): the script path is empty and
     ///     `args` holds Python's own command line (e.g. `-m http.server`) →
     ///     `python <args>`. This is the faithful way to run `python <args>`:
@@ -195,9 +202,49 @@ impl ScriptTask {
             return;
         }
         self.state = TaskState::Stopped;
+        // Drop stdin first so a blocked reader on the other end doesn't linger.
+        self.close_stdin();
         if let Some(child) = self.child.as_mut() {
             let _ = child.kill();
         }
+    }
+
+    /// Send a line of user input to the script's stdin. Appends a newline so
+    /// the script's line-oriented reads (e.g. Python's `input()`) unblock. The
+    /// line is also echoed into the log as `Stream::Input` so the conversation
+    /// is visible. Returns `Err` if stdin is closed (script gone or stdin
+    /// closed) or the write fails — the caller surfaces nothing, the input
+    /// just doesn't go through (mirroring a closed terminal).
+    pub fn write_stdin(&self, line: &str) -> std::io::Result<()> {
+        let Some(stdin) = self.stdin.as_ref() else {
+            return Err(std::io::Error::other("stdin closed"));
+        };
+        // Echo first so the user sees their input immediately, even if the
+        // script is slow to print a response.
+        self.log.lock().unwrap().push(Stream::Input, line.to_string());
+        let mut guard = stdin.lock().unwrap();
+        guard.write_all(line.as_bytes())?;
+        guard.write_all(b"\n")?;
+        // Flush so the line actually reaches the child (ChildStdin is buffered
+        // by default; without this, short lines can sit in the buffer until the
+        // next write or close).
+        guard.flush()?;
+        Ok(())
+    }
+
+    /// Whether the input box should be enabled for this task. True only while
+    /// the task is running AND we still hold a live stdin handle — once the
+    /// child has exited or stdin was closed, sending more input is pointless.
+    pub fn stdin_open(&self) -> bool {
+        self.state == TaskState::Running && self.stdin.is_some()
+    }
+
+    /// Close stdin on the child (sends EOF). Used by the UI's "close stdin"
+    /// button to unblock a script waiting on `input()` without killing it.
+    pub fn close_stdin(&mut self) {
+        // Replacing with None drops the Arc (and the ChildStdin within once the
+        // last clone is gone), which closes the pipe → the child sees EOF.
+        self.stdin = None;
     }
 
     /// Clear the buffered log lines for this task. The log is behind an
@@ -256,6 +303,7 @@ fn failed_task(id: u64, config: TaskConfig, message: String) -> ScriptTask {
         exit_code: None,
         log,
         child: None,
+        stdin: None,
     }
 }
 
@@ -294,7 +342,10 @@ fn spawn_child(
     // its origin in the reader threads below.
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
-    cmd.stdin(Stdio::null());
+    // stdin is piped too, so the UI can send the user's typed lines to the
+    // script (interactive `input()`-based scripts). Stdio::null() would close
+    // stdin immediately and any read would return EOF.
+    cmd.stdin(Stdio::piped());
 
     // On Windows, a console-subsystem child spawned from a GUI (no-console)
     // parent gets a brand-new console window allocated for it — that's the
@@ -322,6 +373,7 @@ fn spawn_child(
 
     let stdout = child.stdout.take().expect("stdout piped");
     let stderr = child.stderr.take().expect("stderr piped");
+    let stdin = child.stdin.take().expect("stdin piped");
     let log = Arc::new(Mutex::new(LogBuffer::new()));
 
     // Two reader threads, one per stream, both feeding the same buffer.
@@ -337,6 +389,9 @@ fn spawn_child(
         exit_code: None,
         log,
         child: Some(child),
+        // Wrap in Arc<Mutex<_>> so the UI thread can write to it without
+        // aliasing the supervisor's `&mut self`.
+        stdin: Some(Arc::new(Mutex::new(stdin))),
     })
 }
 
@@ -349,6 +404,9 @@ fn spawn_reader<R: std::io::Read + Send + 'static>(
         .name(match tag {
             Stream::Stdout => "pyman-stdout".into(),
             Stream::Stderr => "pyman-stderr".into(),
+            // Input is never used for a reader thread (input flows the other
+            // direction, UI → child), so this arm is unreachable in practice.
+            Stream::Input => "pyman-input".into(),
         })
         .spawn(move || {
             let mut reader = BufReader::new(stream);
